@@ -42,9 +42,17 @@ Design notes
   console handler; ``app.logger`` propagates to it). This module therefore does
   **not** create an ad-hoc / root logger of its own.
 * **Lazy ``%``-style logging.** Log calls pass their interpolation arguments
-  positionally (``app.logger.info('%s %s', request.method, request.path)``) so
-  the message is only formatted when the record is actually emitted -- never
+  positionally (``app.logger.info('%s %s', request.method, sanitized_path)``)
+  so the message is only formatted when the record is actually emitted -- never
   with eager f-strings.
+* **Log-injection neutralization (CWE-117).** Werkzeug percent-decodes the
+  request target, so ``request.path`` may contain raw CR/LF (from ``%0d%0a``)
+  or other control characters. Logging it verbatim would let a single request
+  forge extra log records. The ``before_request`` hook therefore routes the
+  path through :func:`_sanitize_log_value`, which escapes control characters to
+  ``\\xNN`` so each request yields exactly one before-line and one after-line.
+  ``request.method`` needs no such treatment -- the HTTP request line cannot
+  carry CR/LF inside the method token.
 * **Never** ``response.mimetype = 'text/plain'``. Assigning the ``mimetype``
   property appends ``; charset=utf-8`` (empirically confirmed on
   Werkzeug 3.1.8), which would *break* the no-charset parity requirement. Only
@@ -61,6 +69,44 @@ Design notes
 """
 
 from flask import request
+
+
+def _sanitize_log_value(value):
+    """Neutralize control characters in a value before it is logged (CWE-117).
+
+    Werkzeug percent-decodes the request target, so an attacker can smuggle raw
+    carriage-return / line-feed bytes (``%0d%0a``) -- or any other control
+    character -- into ``request.path``. Logging that value verbatim would let a
+    *single* request forge additional log records (fake request lines, fake
+    ``status=`` lines), corrupting the audit trail, SIEM ingestion, and any
+    grep / line-count based monitoring -- a log-injection / log-forgery flaw
+    (CWE-117). This helper defuses that by replacing every non-printable
+    character with its ``\\xNN`` escape, so the returned value is always a
+    single, printable token that still faithfully (and harmlessly) represents
+    what was received.
+
+    Printable characters -- letters, digits, punctuation, and the space -- are
+    preserved unchanged so ordinary paths log exactly as before; only control
+    characters (CR, LF, TAB, NUL, ESC, the rest of the C0/C1 ranges, and DEL)
+    are escaped. Membership is decided by :meth:`str.isprintable`, which treats
+    every Unicode control / separator character (except the ordinary space) as
+    non-printable.
+
+    Args:
+        value (str): The raw value to sanitize, e.g. ``request.path``.
+
+    Returns:
+        str: ``value`` with every control character replaced by its ``\\xNN``
+        escape; safe to embed in a single log line.
+    """
+    # Escape any non-printable character to a literal ``\xNN`` sequence (e.g. CR
+    # -> ``\x0d``, LF -> ``\x0a``); keep printable characters as-is so normal
+    # paths are unchanged. The result can never contain a real newline, so it
+    # cannot break out of its log record.
+    return ''.join(
+        ch if ch.isprintable() else '\\x{:02x}'.format(ord(ch))
+        for ch in value
+    )
 
 
 def register_middleware(app):
@@ -94,15 +140,27 @@ def register_middleware(app):
     def _log_request():
         """Log the incoming request method and path, then defer to routing.
 
-        Uses ``%``-style lazy interpolation so the message is only formatted if
-        the record is emitted at the active level. Returns ``None`` so that
-        Flask continues normal request dispatch -- returning any non-``None``
-        value here would short-circuit routing and replace the view's response,
-        which would diverge from the legacy server's behavior.
+        The path is passed through :func:`_sanitize_log_value` first so that
+        control characters Werkzeug may have decoded into it (notably CR/LF from
+        ``%0d%0a``) cannot forge additional log records (CWE-117). Uses
+        ``%``-style lazy interpolation so the message is only formatted if the
+        record is emitted at the active level. Returns ``None`` so that Flask
+        continues normal request dispatch -- returning any non-``None`` value
+        here would short-circuit routing and replace the view's response, which
+        would diverge from the legacy server's behavior.
         """
         # Observe the request for logging only; never branch on it to change
         # the response (the response is fixed by app/routes.py).
-        app.logger.info('%s %s', request.method, request.path)
+        #
+        # ``request.path`` is sanitized before it is logged: Werkzeug
+        # percent-decodes the request target, so an attacker can inject raw
+        # CR/LF (``%0d%0a``) into the path and forge extra log lines
+        # (log injection / forgery, CWE-117). ``_sanitize_log_value`` escapes
+        # those control characters so a single request always produces exactly
+        # one before_request record. ``request.method`` is left as-is: the HTTP
+        # request line guarantees the method token contains no CR/LF, so it is
+        # not an injection vector. ``%``-style args keep the interpolation lazy.
+        app.logger.info('%s %s', request.method, _sanitize_log_value(request.path))
         # Explicitly return None: do NOT short-circuit the request dispatch.
         return None
 
