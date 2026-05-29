@@ -136,12 +136,18 @@ The service starts on `http://127.0.0.1:3000/` and logs:
 Server running at http://127.0.0.1:3000/
 ```
 
-Alternatively, run it through the Flask CLI (host and port default to `127.0.0.1:3000`):
+Alternatively, run it through the Flask CLI. Flask's `run` command binds to host `127.0.0.1` and port **`5000`** by default, so pass explicit `--host` / `--port` flags to preserve the legacy `127.0.0.1:3000` bind:
 
 ```bash
-flask --app wsgi run
+flask --app wsgi run --host 127.0.0.1 --port 3000
 # or, equivalently:
-FLASK_APP=wsgi flask run
+FLASK_APP=wsgi flask run --host 127.0.0.1 --port 3000
+```
+
+The Flask CLI also honors its own `FLASK_RUN_HOST` / `FLASK_RUN_PORT` environment variables, so you can set those instead of passing flags:
+
+```bash
+FLASK_RUN_HOST=127.0.0.1 FLASK_RUN_PORT=3000 flask --app wsgi run
 ```
 
 After an editable install (`pip install -e .`), the packaged console-script entrypoint is also available:
