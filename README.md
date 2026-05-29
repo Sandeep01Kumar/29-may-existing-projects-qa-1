@@ -79,6 +79,7 @@ hello_world/
 │   └── test_app.py          # pytest behavioral parity suite
 ├── wsgi.py                  # WSGI entrypoint (exposes `app` for Gunicorn / PM2)
 ├── run.py                   # Development launcher (parity with `node server.js`)
+├── gunicorn.conf.py         # Gunicorn config (auto-loaded; logs the startup line)
 ├── requirements.txt         # Pinned runtime dependencies
 ├── pyproject.toml           # Python packaging metadata (name, version, license)
 ├── ecosystem.config.js      # PM2 process definition (supervises Gunicorn)
@@ -160,17 +161,19 @@ hello-world
 
 ## Running — Production
 
-Serve the WSGI application directly with Gunicorn. The leading `-c wsgi.py` loads `wsgi.py` as Gunicorn's configuration file, which activates its `on_starting` master-process hook so the startup line is logged exactly once (in the arbiter, before the workers fork):
+Serve the WSGI application directly with Gunicorn:
 
 ```bash
-gunicorn -c wsgi.py wsgi:app -b 127.0.0.1:3000 -w 2
+gunicorn wsgi:app -b 127.0.0.1:3000 -w 2
 ```
 
-On startup this logs the same line as the development launcher:
+Gunicorn auto-loads `gunicorn.conf.py` from the working directory (its default config path) when no `-c` flag is given. That config file's `on_starting` master-process hook logs the startup line exactly once (in the arbiter, before the workers fork), so run this command **from the repository root**. On startup it logs the same line as the development launcher:
 
 ```text
 Server running at http://127.0.0.1:3000/
 ```
+
+> An explicit form, `gunicorn -c wsgi.py wsgi:app -b 127.0.0.1:3000 -w 2`, is also supported (the equivalent hook lives in `wsgi.py`). The two are mutually exclusive — Gunicorn loads only one config file per run — so the banner is emitted exactly once either way.
 
 Or supervise Gunicorn with **PM2** (per the production-deployment requirement). PM2 is installed globally and runs the Gunicorn binary directly via `interpreter: 'none'`:
 
@@ -192,6 +195,8 @@ pm2 save
 ```
 
 PM2 supervises the Gunicorn process defined in `ecosystem.config.js`, providing restart-on-crash, log capture, and boot persistence; Gunicorn performs the actual request serving.
+
+> **Note on `pm2 startup`:** This command is host- and init-system-specific. It inspects the running init system (e.g. systemd) and the deployment user to generate the correct boot-persistence configuration, so it must be run on the **real target host**, as the **intended deployment user**, on a machine whose init system is actually booted. In ephemeral or non-booted environments (for example, a container that is not started under systemd) `pm2 startup` may emit init-system/D-Bus errors or write a service unit with an `undefined` user (e.g. `pm2-undefined.service`); these are environmental and do not indicate a problem with the application. On such environments, skip `pm2 startup`/`pm2 save` and rely on `pm2 start ecosystem.config.js` directly. To undo a previously installed startup hook on a supported host, use `pm2 unstartup <init_system>` (e.g. `pm2 unstartup systemd`).
 
 ---
 

@@ -36,19 +36,20 @@ The legacy server emits ``Content-Type: text/plain`` with **no** charset suffix.
 Flask's three response-construction strategies behave differently -- empirically
 re-confirmed against Flask 3.1.3 / Werkzeug 3.1.8 in this environment:
 
-================================================================  ===========================  =======
-Strategy                                                          Resulting Content-Type       Verdict
-================================================================  ===========================  =======
-``return 'Hello, World!\\n'`` (bare string)                        ``text/html; charset=utf-8``  wrong
-``Response(..., mimetype='text/plain')``                          ``text/plain; charset=utf-8`` wrong
-``Response('Hello, World!\\n', status=200,``                       ``text/plain``                exact
+==================================================================  ===========================  =======
+Strategy                                                            Resulting Content-Type       Verdict
+==================================================================  ===========================  =======
+``return 'Hello, World!\\n'`` (bare string)                          ``text/html; charset=utf-8``  wrong
+``Response(...)`` built with the ``mimetype`` keyword                ``text/plain; charset=utf-8`` wrong
+``Response('Hello, World!\\n', status=200,``                         ``text/plain``                exact
 ``         content_type='text/plain')``
-================================================================  ===========================  =======
+==================================================================  ===========================  =======
 
 Consequently this module **always** constructs responses with the explicit
 ``content_type='text/plain'`` keyword. It **never** returns a bare string (which
-yields ``text/html``) and **never** uses ``mimetype=`` (which appends
-``; charset=utf-8``). Only the bare header string matches the legacy server.
+yields ``text/html``) and **never** passes the ``mimetype`` keyword (which
+appends ``; charset=utf-8``). Only the bare header string matches the legacy
+server.
 
 Universal method & path acceptance (AAP 0.6.2)
 ----------------------------------------------
@@ -153,9 +154,10 @@ def catch_all(path):
     The response is constructed with an explicit ``content_type='text/plain'``
     so the ``Content-Type`` header is the bare ``text/plain`` (no ``charset``
     suffix), matching the legacy header byte-for-byte (AAP 0.6.1). Returning a
-    bare string would yield ``text/html`` and ``mimetype='text/plain'`` would
-    append ``; charset=utf-8`` -- both are avoided here. The full body string is
-    returned (not streamed) so Werkzeug auto-computes ``Content-Length: 14``.
+    bare string would yield ``text/html``, and passing the ``mimetype`` keyword
+    as ``'text/plain'`` would append ``; charset=utf-8`` -- both are avoided
+    here. The full body string is returned (not streamed) so Werkzeug
+    auto-computes ``Content-Length: 14``.
 
     Args:
         path (str): The matched URL remainder (``''`` for the root). Accepted for
@@ -169,8 +171,8 @@ def catch_all(path):
         (body stripped, ``Content-Length: 14`` retained).
     """
     # Explicit content_type='text/plain' => bare 'text/plain' (no charset).
-    # This is THE parity-critical line (AAP 0.6.1): never a bare string, never
-    # mimetype=. Status is 200 on this -- the only -- code path.
+    # This is THE parity-critical line (AAP 0.6.1): never a bare string, and
+    # never the mimetype keyword. Status is 200 on this -- the only -- code path.
     return Response(RESPONSE_BODY, status=200, content_type='text/plain')
 
 

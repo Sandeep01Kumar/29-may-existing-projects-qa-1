@@ -11,6 +11,7 @@ and exercised through Flask's ``test_client()``.
 """
 import io
 import logging
+import re
 from contextlib import redirect_stderr
 
 import pytest
@@ -18,6 +19,7 @@ from werkzeug.test import run_wsgi_app
 
 from app import create_app
 from app.config import Config
+from app.logging_config import STARTUP_LOGGER_NAME, log_startup
 from app.middleware import _sanitize_log_value
 
 EXPECTED_BODY = b'Hello, World!\n'   # 14 bytes including the trailing newline
@@ -133,13 +135,32 @@ def _redirect_console_handler_to_buffer():
     """Point the configured root ``StreamHandler`` at a fresh ``StringIO``.
 
     ``configure_logging`` (run inside ``create_app``) installs a single root
-    ``StreamHandler`` writing to stderr. For deterministic assertions we
-    redirect that handler's stream to an in-memory buffer and read it back. The
-    next ``create_app`` re-runs ``dictConfig``, which replaces the handler, so
-    this redirection never leaks across tests.
+    ``StreamHandler`` writing to stderr (the structured ``console`` handler that
+    renders ordinary application logs, including the middleware request logs).
+    For deterministic assertions we redirect that handler's stream to an
+    in-memory buffer and read it back. The next ``create_app`` re-runs
+    ``dictConfig``, which replaces the handler, so this redirection never leaks
+    across tests.
     """
     buf = io.StringIO()
     for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.StreamHandler):
+            handler.stream = buf
+    return buf
+
+
+def _redirect_startup_logger_to_buffer():
+    """Point the dedicated startup logger's bare ``StreamHandler`` at a buffer.
+
+    ``configure_logging`` wires the canonical startup banner to its own
+    non-propagating ``STARTUP_LOGGER_NAME`` logger (bare ``%(message)s``
+    formatter), separate from the structured root ``console`` handler. Redirect
+    that handler's stream so the banner can be asserted in isolation. Like the
+    root redirect above, ``dictConfig`` replaces the handler on the next
+    ``create_app``, so the redirection never leaks across tests.
+    """
+    buf = io.StringIO()
+    for handler in logging.getLogger(STARTUP_LOGGER_NAME).handlers:
         if isinstance(handler, logging.StreamHandler):
             handler.stream = buf
     return buf
@@ -283,11 +304,98 @@ def test_crlf_path_does_not_forge_log_lines():
     lines = out.rstrip('\n').split('\n')
 
     # Exactly two log records for the single request: one before, one after.
+    # Each carries the structured ``[<ts>] <LEVEL> in <module>: <message>``
+    # prefix now, so we assert on the message tail rather than equality.
     assert len(lines) == 2
     # The after_request line is the genuine one and reports the real status.
-    assert lines[1] == 'status=200'
+    assert lines[1].endswith('status=200')
+    assert ' in middleware: status=200' in lines[1]
     # No raw CR/LF leaked into the log stream.
     assert '\r' not in out
     # The forged tokens never appear as standalone records.
     assert '\nstatus=999' not in out
     assert '\nGET /fake' not in out
+
+
+# Regex matching the structured request-log prefix
+# ``[<timestamp>] <LEVEL> in <module>: `` (Flask's conventional default format).
+_STRUCTURED_PREFIX = re.compile(r'^\[.+\] [A-Z]+ in \w+: ')
+
+
+def test_request_logs_use_structured_formatter():
+    """QA MAJOR Issue 2: request/response logs use the structured formatter.
+
+    Each per-request line emitted by the middleware must render as
+    ``[<ts>] <LEVEL> in <module>: <message>`` (e.g.
+    ``[2026-...] INFO in middleware: GET /probe``), NOT the prior message-only
+    ``%(message)s`` rendering. This guards the observability fix from regressing.
+    """
+    class InfoConfig(Config):
+        DEBUG = False
+        LOG_LEVEL = 'INFO'
+
+    app = create_app(InfoConfig)
+    buf = _redirect_console_handler_to_buffer()
+    app.testing = True
+    app.test_client().get('/probe')
+    out = buf.getvalue()
+    lines = out.rstrip('\n').split('\n')
+
+    # Two structured records: the before-request method/path and the
+    # after-request status, both prefixed and naming the ``middleware`` module.
+    assert len(lines) == 2
+    assert _STRUCTURED_PREFIX.match(lines[0]), repr(lines[0])
+    assert _STRUCTURED_PREFIX.match(lines[1]), repr(lines[1])
+    assert ' in middleware: ' in lines[0]
+    assert ' in middleware: ' in lines[1]
+    # The messages themselves are preserved at the tail of each structured line.
+    assert lines[0].endswith('GET /probe')
+    assert lines[1].endswith('status=200')
+
+
+def test_log_startup_emits_bare_banner_exactly_once():
+    """QA MAJOR Issue 1/2: the startup banner is bare and emitted exactly once.
+
+    ``log_startup`` must emit ``Server running at http://127.0.0.1:3000/``
+    byte-for-byte (NO ``[<ts>] <LEVEL> in <module>:`` prefix) through the
+    dedicated, non-propagating startup logger, so it is rendered once and is
+    never duplicated onto the structured root handler.
+    """
+    app = create_app()  # default config -> legacy loopback 127.0.0.1:3000
+
+    # Capture BOTH sinks: the structured root handler and the bare startup
+    # handler, to prove the banner goes only to the latter.
+    root_buf = _redirect_console_handler_to_buffer()
+    startup_buf = _redirect_startup_logger_to_buffer()
+
+    log_startup(app)
+
+    banner = 'Server running at http://127.0.0.1:3000/'
+    startup_out = startup_buf.getvalue()
+    # Bare: the dedicated handler renders exactly the message plus the handler's
+    # newline terminator -- no timestamp/level/module prefix.
+    assert startup_out == banner + '\n'
+    assert startup_out.count(banner) == 1
+    # The structured root handler (propagate=False on the startup logger) never
+    # sees the banner, so it cannot be duplicated or prefixed there.
+    assert banner not in root_buf.getvalue()
+
+
+def test_startup_banner_emitted_regardless_of_log_level():
+    """QA MAJOR Issue 1: the startup banner fires even when LOG_LEVEL is high.
+
+    The dedicated startup logger is pinned at INFO independently of the
+    configured ``LOG_LEVEL`` (mirroring the legacy ``console.log`` that always
+    printed), so the banner is emitted once even at ``LOG_LEVEL=WARNING`` where
+    ordinary INFO request logs are suppressed.
+    """
+    class WarnConfig(Config):
+        DEBUG = False
+        LOG_LEVEL = 'WARNING'
+
+    app = create_app(WarnConfig)
+    startup_buf = _redirect_startup_logger_to_buffer()
+
+    log_startup(app)
+
+    assert startup_buf.getvalue() == 'Server running at http://127.0.0.1:3000/\n'

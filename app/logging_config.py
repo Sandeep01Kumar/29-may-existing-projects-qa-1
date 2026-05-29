@@ -14,13 +14,38 @@ configured declaratively through :func:`logging.config.dictConfig`.
 Responsibilities
 ----------------
 * :func:`configure_logging` -- install a process-wide logging configuration
-  (formatter + console handler + root *and* application logger level) sourced
-  from ``app.config['LOG_LEVEL']``, validating that value and falling back to
-  ``'INFO'`` on an unrecognized name. It deliberately does **not** emit the
-  startup banner (see below).
+  sourced from ``app.config['LOG_LEVEL']`` (validating that value and falling
+  back to ``'INFO'`` on an unrecognized name). It installs **two** formatter /
+  handler pairs:
+
+  - a **structured** ``default`` formatter
+    (``[%(asctime)s] %(levelname)s in %(module)s: %(message)s`` -- Flask's own
+    conventional format) on the root ``console`` handler, so ordinary
+    application logs (notably the middleware's per-request before/after lines)
+    carry the ``[<ts>] <LEVEL> in <module>: <message>`` prefix the
+    observability checkpoint requires; and
+  - a **bare** ``%(message)s`` ``startup`` formatter on a dedicated
+    ``startup_console`` handler wired only to the non-propagating
+    :data:`STARTUP_LOGGER_NAME` logger, reserved exclusively for the startup
+    banner.
+
+  It deliberately does **not** emit the startup banner itself (see below).
 * :func:`log_startup` -- emit the single canonical startup line
-  ``Server running at http://{HOST}:{PORT}/`` that mirrors the legacy server's
-  output byte-for-byte, including the trailing slash.
+  ``Server running at http://{HOST}:{PORT}/`` through the dedicated startup
+  logger so it renders byte-for-byte (no prefix), mirroring the legacy server's
+  output including the trailing slash.
+
+Two log renderings, one configuration (observability checkpoint)
+----------------------------------------------------------------
+A single ``%(message)s`` formatter cannot satisfy both observability
+requirements at once: the startup banner must be byte-for-byte bare, yet the
+per-request logs must carry the structured ``[<ts>] <LEVEL> in <module>:``
+prefix. This module resolves that by splitting the two concerns across two
+loggers: the **root** logger (structured ``console`` handler) renders every
+ordinary log line, while the dedicated, non-propagating
+:data:`STARTUP_LOGGER_NAME` logger (bare ``startup_console`` handler) renders
+the banner only. Because the startup logger does not propagate, the banner is
+emitted exactly once and never picks up the structured prefix.
 
 Why the startup line lives in its own function (AAP 0.6.3)
 ----------------------------------------------------------
@@ -33,8 +58,14 @@ the line would be duplicated once per worker -- diverging from the legacy
 single-emission behavior. The banner is therefore isolated in
 :func:`log_startup`, which the *entrypoints* call exactly once: ``run.py`` before
 ``app.run`` for development, and a Gunicorn master-process hook (``on_starting``)
-for production. Keeping the exact wording in a single function also guarantees
-there is one, and only one, source of truth for the message.
+for production. In production that hook lives in ``gunicorn.conf.py`` -- which
+Gunicorn auto-loads from the working directory for the bare
+``gunicorn wsgi:app`` command (no ``-c`` flag required) -- and is mirrored in
+``wsgi.py`` for the explicit ``gunicorn -c wsgi.py wsgi:app`` invocation; both
+delegate to :func:`log_startup`, so the banner fires once in the master process
+regardless of which command is used. Keeping the exact wording in a single
+function also guarantees there is one, and only one, source of truth for the
+message.
 
 Design constraints
 ------------------
@@ -52,16 +83,34 @@ Design constraints
 import logging
 import logging.config
 
+# Name of the dedicated, non-propagating logger that carries the startup banner.
+# The banner ("Server running at http://{HOST}:{PORT}/") must render byte-for-byte
+# with NO prefix, while every other application log line (notably the middleware's
+# per-request before/after records) must render with the structured
+# ``[<ts>] <LEVEL> in <module>: <message>`` prefix. Those two requirements are
+# satisfied by giving the banner its own logger (this name) wired to a bare
+# message-only handler with ``propagate=False`` -- see :func:`configure_logging`
+# (which defines it) and :func:`log_startup` (which emits through it). Kept as a
+# module-level constant so the configuration and the emission site cannot drift.
+STARTUP_LOGGER_NAME = 'hello_world.startup'
+
 
 def configure_logging(app):
     """Configure process-wide logging via :func:`logging.config.dictConfig`.
 
-    Installs a single ``StreamHandler`` (which writes to ``stderr`` by default,
-    matching Flask's own logging destination) wired to the root logger at the
-    verbosity named by ``app.config['LOG_LEVEL']`` (defaulting to ``'INFO'``).
-    Configuring the *root* logger ensures every logger that propagates to it --
-    including Flask's ``app.logger`` and the request loggers used by the
-    middleware -- emits through the same handler at the chosen level.
+    Installs two ``StreamHandler`` s (both writing to ``stderr`` by default,
+    matching Flask's own logging destination):
+
+    * a **structured** root ``console`` handler
+      (``[%(asctime)s] %(levelname)s in %(module)s: %(message)s``) at the
+      verbosity named by ``app.config['LOG_LEVEL']`` (defaulting to ``'INFO'``).
+      Configuring the *root* logger ensures every logger that propagates to it --
+      including Flask's ``app.logger`` and the request logger used by the
+      middleware -- emits through this handler at the chosen level, carrying the
+      structured ``[<ts>] <LEVEL> in <module>: <message>`` prefix; and
+    * a **bare** ``startup_console`` handler (``%(message)s``) wired solely to the
+      dedicated, non-propagating :data:`STARTUP_LOGGER_NAME` logger, used only by
+      :func:`log_startup` so the startup banner renders with no prefix.
 
     Robust ``LOG_LEVEL`` handling
     -----------------------------
@@ -144,40 +193,78 @@ def configure_logging(app):
         'version': 1,
         # Preserve loggers that already exist when this runs (Flask's
         # ``app.logger``, Werkzeug's logger, any third-party loggers); we only
-        # (re)configure the formatter, handler, and root level below.
+        # (re)configure the formatters, handlers, and logger levels below.
         'disable_existing_loggers': False,
         'formatters': {
+            # Structured, operator-facing format for ordinary application logs --
+            # notably the per-request before/after lines emitted by the
+            # middleware. This is Flask's own conventional default format and the
+            # exact shape the observability checkpoint requires:
+            # ``[<ts>] <LEVEL> in <module>: <message>`` (e.g.
+            # ``[2026-01-01 12:00:00,000] INFO in middleware: GET /probe``). The
+            # ``%(module)s`` token resolves to the source module of the logging
+            # call site, so middleware records render ``in middleware:``.
             'default': {
-                # Message-only format: the rendered log line is *exactly* the
-                # message passed to the logging call, with no timestamp / level /
-                # module prefix. This is mandatory for startup-line parity. The
-                # canonical banner emitted by the entrypoints (``run.py`` before
-                # ``app.run`` in development, and the Gunicorn ``on_starting`` hook
-                # in production) must render byte-for-byte as
-                # ``Server running at http://127.0.0.1:3000/`` -- identical to the
-                # legacy Node ``console.log`` output (server.js:L13), trailing
-                # slash included and with *no* leading prefix. A prefixing
-                # formatter (e.g. the conventional
-                # ``[%(asctime)s] %(levelname)s in %(module)s: %(message)s``) would
-                # prepend ``[<ts>] INFO in <module>: `` and break that
-                # byte-for-byte equality. The request/response lines emitted by the
-                # middleware render bare under this formatter too, which is
-                # acceptable -- the logging *capability* is unchanged and only the
-                # rendered prefix is dropped.
+                'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
+            },
+            # Message-only format reserved EXCLUSIVELY for the startup banner. The
+            # canonical banner emitted by the entrypoints (``run.py`` before
+            # ``app.run`` in development, and the Gunicorn ``on_starting`` hook in
+            # production) must render byte-for-byte as
+            # ``Server running at http://127.0.0.1:3000/`` -- identical to the
+            # legacy Node ``console.log`` output (server.js:L13), trailing slash
+            # included and with *no* leading prefix. Routing the banner through a
+            # dedicated logger that uses this bare formatter (the
+            # ``STARTUP_LOGGER_NAME`` logger below) preserves that byte-for-byte
+            # parity while letting every *other* log line carry the structured
+            # ``default`` prefix above. This is the fix for the prior conflict in
+            # which a single ``%(message)s`` formatter stripped the structured
+            # prefix from the request/response logs.
+            'startup': {
                 'format': '%(message)s',
             },
         },
         'handlers': {
+            # Primary console handler for ordinary application logs. Uses the
+            # structured ``default`` formatter and is attached to the root logger,
+            # so every propagating logger (including Flask's ``app.logger`` and the
+            # middleware request logger) is rendered with the structured prefix.
             'console': {
                 # ``StreamHandler`` defaults to ``sys.stderr`` -- the same
                 # destination Flask uses for its own default handler.
                 'class': 'logging.StreamHandler',
                 'formatter': 'default',
             },
+            # Dedicated handler for the startup banner ONLY. Uses the bare
+            # ``startup`` formatter so the banner is emitted with no prefix, and is
+            # wired solely to the non-propagating ``STARTUP_LOGGER_NAME`` logger
+            # below, so the banner is rendered exactly once, bare.
+            'startup_console': {
+                'class': 'logging.StreamHandler',
+                'formatter': 'startup',
+            },
+        },
+        'loggers': {
+            # Dedicated, non-propagating logger that carries the startup banner.
+            # :func:`log_startup` emits through this logger so the banner renders
+            # via the bare ``startup`` formatter (no prefix), byte-for-byte
+            # identical to the legacy line. ``propagate`` is ``False`` so the
+            # record does NOT also travel to the structured root ``console``
+            # handler -- that guarantees the banner appears exactly once and is
+            # never prefixed. Its level is pinned to ``INFO`` independently of the
+            # configured ``LOG_LEVEL`` so the banner is always emitted at startup,
+            # mirroring the legacy ``console.log`` that fired unconditionally.
+            STARTUP_LOGGER_NAME: {
+                'level': 'INFO',
+                'handlers': ['startup_console'],
+                'propagate': False,
+            },
         },
         'root': {
             # Honor the configured verbosity at the root logger so that every
-            # propagating logger (including ``app.logger``) is filtered to it.
+            # propagating logger (including ``app.logger`` and the middleware
+            # request logger) is filtered to it and rendered through the
+            # structured ``console`` handler above.
             'level': log_level,
             'handlers': ['console'],
         },
@@ -216,22 +303,43 @@ def configure_logging(app):
 
 
 def log_startup(app):
-    """Emit the canonical startup banner exactly once.
+    """Emit the canonical startup banner exactly once, with no prefix.
 
-    Logs the line ``Server running at http://{HOST}:{PORT}/`` at ``INFO`` level
-    through ``app.logger``. With the default configuration this renders as
-    ``Server running at http://127.0.0.1:3000/`` -- byte-for-byte identical to
-    the legacy Node.js server's ``console.log`` output (``server.js`` line 13),
-    including the trailing slash.
+    Logs the line ``Server running at http://{HOST}:{PORT}/`` through the
+    dedicated, non-propagating ``STARTUP_LOGGER_NAME`` logger (configured by
+    :func:`configure_logging` with the bare ``%(message)s`` formatter). With the
+    default configuration this renders as ``Server running at
+    http://127.0.0.1:3000/`` -- byte-for-byte identical to the legacy Node.js
+    server's ``console.log`` output (``server.js`` line 13), including the
+    trailing slash and with **no** ``[<ts>] <LEVEL> in <module>:`` prefix.
+
+    Why a dedicated logger (not ``app.logger``)
+    -------------------------------------------
+    Ordinary application logs -- in particular the middleware's per-request
+    before/after records emitted through ``app.logger`` -- must carry the
+    structured ``[<ts>] <LEVEL> in <module>: <message>`` prefix (the
+    observability checkpoint requires it). The startup banner, by contrast, must
+    stay byte-for-byte bare. Emitting the banner through this separate logger --
+    which :func:`configure_logging` wires to the bare ``startup`` formatter with
+    ``propagate=False`` -- satisfies both at once: the request logs are
+    structured (via the root ``console`` handler) while the banner is bare (via
+    the ``startup_console`` handler) and is never duplicated onto the structured
+    handler. The dedicated logger is pinned at ``INFO`` regardless of
+    ``LOG_LEVEL``, so the banner always fires at startup just as the legacy
+    ``console.log`` did.
 
     This is the *single* source of truth for the startup message. It is invoked
-    by the entrypoints -- ``run.py`` before ``app.run`` in development, and a
-    Gunicorn master-process ``on_starting`` hook in production -- so that the
-    banner is printed once at startup rather than once per worker (AAP 0.6.3).
+    by the entrypoints -- ``run.py`` before ``app.run`` in development, the
+    Gunicorn master-process ``on_starting`` hook (auto-loaded from
+    ``gunicorn.conf.py`` for the bare ``gunicorn wsgi:app`` command, and also
+    defined in ``wsgi.py`` for the explicit ``-c wsgi.py`` invocation) in
+    production -- so that the banner is printed once at startup rather than once
+    per worker (AAP 0.6.3).
 
     Args:
         app: The Flask application supplying ``config`` (for the ``HOST`` /
-            ``PORT`` values) and ``logger`` (the emission channel).
+            ``PORT`` values). The banner is emitted through the dedicated
+            startup logger rather than ``app.logger`` (see above).
     """
     # Source host/port from configuration, defaulting to the legacy loopback
     # binding (``server.js`` lines 3-4: hostname='127.0.0.1', port=3000) so the
@@ -239,7 +347,11 @@ def log_startup(app):
     host = app.config.get('HOST', '127.0.0.1')
     port = app.config.get('PORT', 3000)
 
-    # Use %-style lazy interpolation (the arguments are only formatted if the
-    # record is actually emitted). The trailing slash after the port is
+    # Emit through the dedicated, non-propagating startup logger so the banner
+    # renders via the bare ``startup`` formatter (no prefix) and is never
+    # duplicated onto the structured root handler. %-style lazy interpolation
+    # defers formatting until emission; the trailing slash after the port is
     # mandatory for byte-for-byte parity with the legacy line (server.js:L13).
-    app.logger.info('Server running at http://%s:%s/', host, port)
+    logging.getLogger(STARTUP_LOGGER_NAME).info(
+        'Server running at http://%s:%s/', host, port
+    )

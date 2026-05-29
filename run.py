@@ -71,10 +71,14 @@ Public symbols
 # ``create_app`` is the application factory -- the Python successor to the legacy
 # ``http.createServer(...)`` call. ``Config`` supplies the loopback-preserving
 # HOST/PORT defaults (127.0.0.1:3000) that this launcher falls back to when
-# resolving the bind address. Both use the absolute ``from app...`` convention
-# so the import graph is unambiguous regardless of how the launcher is started.
+# resolving the bind address. ``log_startup`` is the single source of truth for
+# the canonical startup banner (emitted through a dedicated bare-formatter logger
+# so it stays byte-for-byte identical to the legacy line). All use the absolute
+# ``from app...`` convention so the import graph is unambiguous regardless of how
+# the launcher is started.
 from app import create_app
 from app.config import Config
+from app.logging_config import log_startup
 
 
 def main():
@@ -99,13 +103,17 @@ def main():
        always applies even if the keys were somehow absent. ``PORT`` is coerced
        to :class:`int` because environment variables arrive as strings while
        :meth:`flask.Flask.run` requires an integer port.
-    3. **Emit the startup banner** ``Server running at http://{host}:{port}/``
-       through the configured ``app.logger`` at ``INFO`` level. With the default
-       configuration this renders as ``Server running at http://127.0.0.1:3000/``
-       -- byte-for-byte identical to the legacy ``console.log`` output
-       (``server.js`` line 13), trailing slash included. The factory does not
-       emit this line, so logging it here produces exactly one banner per
-       development launch (AAP 0.6.3).
+    3. **Emit the startup banner** ``Server running at http://{host}:{port}/`` by
+       delegating to :func:`app.logging_config.log_startup` -- the single source
+       of truth for the banner -- which emits through a dedicated,
+       non-propagating bare-formatter logger. With the default configuration this
+       renders as ``Server running at http://127.0.0.1:3000/`` -- byte-for-byte
+       identical to the legacy ``console.log`` output (``server.js`` line 13),
+       trailing slash included and with no structured prefix (the
+       request/response logs, by contrast, now carry the structured
+       ``[<ts>] <LEVEL> in <module>:`` prefix). The factory does not emit this
+       line, so logging it here produces exactly one banner per development
+       launch (AAP 0.6.3).
     4. **Start the development server** via :meth:`flask.Flask.run`, binding to
        the resolved host and port with ``use_reloader=False``. This is a blocking
        call that serves requests until the process is interrupted (e.g. Ctrl-C),
@@ -135,10 +143,13 @@ def main():
     port = int(app.config.get('PORT', Config.PORT))
 
     # Step 3 -- emit the canonical startup banner exactly once, before serving.
-    # The wording (and mandatory trailing slash) matches the legacy line
-    # byte-for-byte (``server.js`` line 13). %-style lazy interpolation defers
-    # string formatting until the record is actually emitted.
-    app.logger.info('Server running at http://%s:%s/', host, port)
+    # Delegated to ``log_startup`` (the single source of truth for the banner),
+    # which emits through a dedicated, non-propagating bare-formatter logger so
+    # the line renders byte-for-byte as ``Server running at
+    # http://127.0.0.1:3000/`` (``server.js`` line 13, trailing slash included)
+    # with NO structured prefix -- even though the request/response logs now use
+    # the structured ``[<ts>] <LEVEL> in <module>:`` formatter.
+    log_startup(app)
 
     # Step 4 -- start Flask's built-in development server. This blocks, serving
     # requests until interrupted -- the parity equivalent of ``server.listen``.
