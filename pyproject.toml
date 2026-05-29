@@ -1,0 +1,57 @@
+# pyproject.toml — Python packaging metadata for the "hello_world" Flask service.
+#
+# This file is the Python successor to the legacy Node.js `package.json`. It ports
+# the original project identity verbatim (name, version, author, MIT license) and
+# corrects two documented legacy inconsistencies:
+#   1. package.json's `main` pointed to a nonexistent `index.js`; here a REAL
+#      console-script entrypoint (`hello-world = "run:main"`) is declared.
+#   2. The placeholder npm `test` script (which exited 1) is superseded by a real
+#      pytest suite, installable via the optional `dev` dependency group.
+#
+# Specification authority: Technical Specification AAP sections 0.3.1, 0.4.1,
+# 0.7.1, 0.7.3. Source reference: legacy package.json.
+
+[build-system]
+# PEP 517/518 build backend. setuptools >= 61.0 is required for native PEP 621
+# `[project]` table support and `[tool.setuptools]` declarative configuration.
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# --- Project identity: preserved EXACTLY from the legacy package.json (AAP 0.7.1) ---
+name = "hello_world"
+version = "1.0.0"
+# Description updated to reflect the Python/Flask stack; the legacy text
+# "Hello world in Node.js" is no longer accurate after the migration.
+description = "Hello World HTTP service implemented in Python 3 with Flask"
+readme = "README.md"
+# Flask 3.1.x requires Python >= 3.9.
+requires-python = ">=3.9"
+# MIT license carried over from package.json. The table form `{ text = "MIT" }`
+# is used for broad compatibility across setuptools versions.
+license = { text = "MIT" }
+authors = [{ name = "hxu" }]
+# --- Runtime dependencies: pinned to mirror requirements.txt EXACTLY ---
+dependencies = [
+    "Flask==3.1.3",
+    "gunicorn==26.0.0",
+    "python-dotenv==1.2.2",
+]
+
+[project.optional-dependencies]
+# Development / test extras. Install with: pip install -e ".[dev]"
+# pytest powers the behavioral parity suite in tests/test_app.py, replacing the
+# legacy placeholder npm test that always exited 1.
+dev = ["pytest==9.0.3"]
+
+[project.scripts]
+# Real console-script entrypoint, correcting the legacy `main -> index.js`
+# inconsistency. Maps the `hello-world` command to the `main()` callable in run.py.
+hello-world = "run:main"
+
+[tool.setuptools]
+# Explicit package discovery for the repository's flat layout: the `app` package
+# (application factory, config, routes, middleware, logging) plus the two
+# top-level entrypoint modules `wsgi` (Gunicorn/PM2 target) and `run` (dev launcher).
+packages = ["app"]
+py-modules = ["wsgi", "run"]
