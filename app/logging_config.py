@@ -102,9 +102,23 @@ def configure_logging(app):
         'disable_existing_loggers': False,
         'formatters': {
             'default': {
-                # Conventional Flask-style development format: timestamp, level,
-                # originating module, then the message itself.
-                'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
+                # Message-only format: the rendered log line is *exactly* the
+                # message passed to the logging call, with no timestamp / level /
+                # module prefix. This is mandatory for startup-line parity. The
+                # canonical banner emitted by the entrypoints (``run.py`` before
+                # ``app.run`` in development, and the Gunicorn ``on_starting`` hook
+                # in production) must render byte-for-byte as
+                # ``Server running at http://127.0.0.1:3000/`` -- identical to the
+                # legacy Node ``console.log`` output (server.js:L13), trailing
+                # slash included and with *no* leading prefix. A prefixing
+                # formatter (e.g. the conventional
+                # ``[%(asctime)s] %(levelname)s in %(module)s: %(message)s``) would
+                # prepend ``[<ts>] INFO in <module>: `` and break that
+                # byte-for-byte equality. The request/response lines emitted by the
+                # middleware render bare under this formatter too, which is
+                # acceptable -- the logging *capability* is unchanged and only the
+                # rendered prefix is dropped.
+                'format': '%(message)s',
             },
         },
         'handlers': {

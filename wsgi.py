@@ -19,10 +19,13 @@ The import target: ``wsgi:app``
 -------------------------------
 Gunicorn is invoked (by ``ecosystem.config.js`` under PM2) as::
 
-    gunicorn wsgi:app -b 127.0.0.1:3000 -w 2
+    gunicorn -c wsgi.py wsgi:app -b 127.0.0.1:3000 -w 2
 
-The ``wsgi:app`` token means "import the module ``wsgi`` and use its module-level
-attribute ``app`` as the WSGI application." This module therefore MUST expose a
+The leading ``-c wsgi.py`` loads *this* module as Gunicorn's configuration file
+so the :func:`on_starting` hook (defined below) runs once in the master process
+and emits the startup banner (AAP 0.6.3). The ``wsgi:app`` token means "import
+the module ``wsgi`` and use its module-level attribute ``app`` as the WSGI
+application." This module therefore MUST expose a
 module-level callable named ``app``; that is the one mandatory contract of the
 file (AAP 0.4.1). The default bind ``127.0.0.1:3000`` -- which preserves the
 legacy loopback-only behavior (``server.js`` lines 3-4) -- is supplied by
@@ -53,23 +56,26 @@ cross-request bookkeeping. This module deliberately introduces no module-level
 mutable state of its own (only the immutable ``app`` reference), preserving that
 guarantee across any number of workers.
 
-Startup banner (optional, AAP 0.6.3)
-------------------------------------
+Startup banner (AAP 0.6.3)
+--------------------------
 The legacy server logged ``Server running at http://127.0.0.1:3000/`` exactly
 once, when ``server.listen`` fired. The application factory intentionally does
 **not** emit that banner (doing so would duplicate it once per worker), so under
-Gunicorn the single-emission behavior is reproduced by the optional
-:func:`on_starting` master-process hook below. See that function's docstring for
-its precise activation conditions; the hook is a pure logging side effect and
-never alters the WSGI contract.
+Gunicorn the single-emission behavior is reproduced by the
+:func:`on_starting` master-process hook below. Because the production descriptor
+``ecosystem.config.js`` launches Gunicorn with ``-c wsgi.py``, that hook is
+active by default and fires exactly once in the arbiter (master) process. See
+that function's docstring for the activation mechanism; the hook is a pure
+logging side effect and never alters the WSGI contract.
 
 Public symbols
 --------------
 * :data:`app` -- the WSGI application callable loaded as ``wsgi:app`` by
   Gunicorn/PM2. **This is the mandatory export.**
-* :func:`on_starting` -- optional Gunicorn server hook that logs the startup
-  banner once in the master process (active only when this module is passed to
-  Gunicorn as a config file; see its docstring).
+* :func:`on_starting` -- Gunicorn server hook that logs the startup banner once
+  in the master process. It is active under the production descriptor
+  ``ecosystem.config.js`` (which passes ``-c wsgi.py``); see its docstring for
+  the activation mechanism.
 """
 
 # --- Internal package import (absolute, per AAP 0.4.2) ------------------------
@@ -112,14 +118,15 @@ def on_starting(server):
 
         gunicorn -c wsgi.py wsgi:app
 
-    The default production invocation in ``ecosystem.config.js`` is
-    ``gunicorn wsgi:app -b 127.0.0.1:3000 -w 2`` (no ``-c``), under which this
-    hook lies dormant and the banner is simply not printed -- exactly as if the
-    hook were absent. It is provided so that operators who prefer the config-file
-    form get the legacy startup banner for free, with no other change. Defining
-    this function has **no effect** on the ``wsgi:app`` import target: it is an
-    ordinary module-level callable that Gunicorn discovers *by name* only when
-    this module is used as its config file.
+    The production descriptor ``ecosystem.config.js`` invokes Gunicorn as
+    ``gunicorn -c wsgi.py wsgi:app -b 127.0.0.1:3000 -w 2``; the leading
+    ``-c wsgi.py`` loads this module as Gunicorn's config file, so this hook is
+    active by default in production and emits the legacy startup banner once in
+    the arbiter. (Were Gunicorn started without ``-c`` -- e.g. a bare
+    ``gunicorn wsgi:app`` -- the hook would simply lie dormant and print nothing,
+    exactly as if it were absent.) Defining this function has **no effect** on the
+    ``wsgi:app`` import target: it is an ordinary module-level callable that
+    Gunicorn discovers *by name* only when this module is used as its config file.
 
     The banner wording is emitted inline here (rather than delegating to
     ``app/logging_config.py``) to keep this module's import surface limited to the

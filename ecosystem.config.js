@@ -61,12 +61,22 @@ module.exports = {
       script: './venv/bin/gunicorn',
 
       // Arguments passed verbatim to the Gunicorn binary:
+      //   -c wsgi.py          -> load wsgi.py as Gunicorn's CONFIG file so its
+      //                          `on_starting` master-process hook fires and emits
+      //                          the legacy startup banner
+      //                          (`Server running at http://127.0.0.1:3000/`)
+      //                          exactly once, in the arbiter, before any worker
+      //                          forks (AAP 0.6.3). Without `-c`, that hook stays
+      //                          dormant and the production path would emit no
+      //                          startup line at all. `wsgi.py` also defines the
+      //                          `app` object, but the positional `wsgi:app`
+      //                          below is what selects the WSGI callable to serve.
       //   wsgi:app            -> import the `app` object from wsgi.py (the Flask
       //                          WSGI callable produced by create_app()).
       //   -b 127.0.0.1:3000   -> bind loopback interface, port 3000 (legacy default).
       //   -w 2                -> 2 sync worker processes (kept small for this
       //                          stateless fixture, per AAP 0.6.5).
-      args: 'wsgi:app -b 127.0.0.1:3000 -w 2',
+      args: '-c wsgi.py wsgi:app -b 127.0.0.1:3000 -w 2',
 
       // CRITICAL: tells PM2 to exec `script` DIRECTLY as a standalone binary
       // rather than running it through the Node.js interpreter. This is the

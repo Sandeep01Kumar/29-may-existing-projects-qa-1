@@ -107,11 +107,15 @@ def main():
        emit this line, so logging it here produces exactly one banner per
        development launch (AAP 0.6.3).
     4. **Start the development server** via :meth:`flask.Flask.run`, binding to
-       the resolved host and port. This is a blocking call that serves requests
-       until the process is interrupted (e.g. Ctrl-C), mirroring the legacy
-       ``server.listen`` behavior. Whether the auto-reloader/debugger is active
-       follows ``app.config['DEBUG']`` (enabled by ``DevelopmentConfig``); the
-       HTTP response contract is unaffected either way.
+       the resolved host and port with ``use_reloader=False``. This is a blocking
+       call that serves requests until the process is interrupted (e.g. Ctrl-C),
+       mirroring the legacy ``server.listen`` behavior. The auto-reloader is
+       explicitly disabled: ``DevelopmentConfig`` sets ``DEBUG=True`` and Flask
+       would otherwise default the reloader *on* (keying it off ``app.debug``),
+       re-executing this module in a child process and emitting the startup
+       banner a second time. Disabling it preserves the legacy single-emission
+       startup behavior (AAP 0.6.3). The interactive debugger (also keyed off
+       ``DEBUG``) and the HTTP response contract are both unaffected.
 
     Returns:
         None. The call blocks inside :meth:`flask.Flask.run` for the lifetime of
@@ -138,7 +142,16 @@ def main():
 
     # Step 4 -- start Flask's built-in development server. This blocks, serving
     # requests until interrupted -- the parity equivalent of ``server.listen``.
-    app.run(host=host, port=port)
+    # ``use_reloader=False`` is mandatory for startup-line parity: the active
+    # configuration is ``DevelopmentConfig`` (``DEBUG=True``), and Flask defaults
+    # the auto-reloader *on* from ``app.debug``. With the reloader enabled,
+    # Werkzeug re-executes this module in a child process, which would run
+    # ``main()`` -- and therefore re-emit the startup banner -- a second time.
+    # Disabling the reloader preserves the single-process, single-emission
+    # behavior of the legacy ``node server.js`` so the banner is emitted exactly
+    # once (in Step 3 above), per AAP 0.6.3. The HTTP response contract is
+    # unaffected.
+    app.run(host=host, port=port, use_reloader=False)
 
 
 # Standard Python entrypoint guard: invoke ``main()`` only when this module is

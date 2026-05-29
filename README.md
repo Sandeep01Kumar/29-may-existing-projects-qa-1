@@ -160,10 +160,16 @@ hello-world
 
 ## Running — Production
 
-Serve the WSGI application directly with Gunicorn:
+Serve the WSGI application directly with Gunicorn. The leading `-c wsgi.py` loads `wsgi.py` as Gunicorn's configuration file, which activates its `on_starting` master-process hook so the startup line is logged exactly once (in the arbiter, before the workers fork):
 
 ```bash
-gunicorn wsgi:app -b 127.0.0.1:3000 -w 2
+gunicorn -c wsgi.py wsgi:app -b 127.0.0.1:3000 -w 2
+```
+
+On startup this logs the same line as the development launcher:
+
+```text
+Server running at http://127.0.0.1:3000/
 ```
 
 Or supervise Gunicorn with **PM2** (per the production-deployment requirement). PM2 is installed globally and runs the Gunicorn binary directly via `interpreter: 'none'`:
