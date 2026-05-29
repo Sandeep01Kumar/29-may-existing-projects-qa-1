@@ -1,0 +1,18 @@
+# Python virtual environment
+venv/
+.venv/
+
+# Python bytecode / caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Test / build / packaging artifacts
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Environment files (local secrets/overrides)
+.env
