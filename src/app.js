@@ -10,23 +10,23 @@
  * (mounted here), and the raw `http` server creation is replaced by the Express
  * `app`. Consequently, NO `http` module is imported in this file.
  *
- * Separation of concerns — listen() is deliberately NOT called here:
+ * Separation of concerns — the network bind is deliberately NOT performed here:
  *   This factory assembles the application (middleware + routes + error
- *   handling) and exports the bare `app` object. The listening/bootstrap
+ *   handling) and exports the bare `app` object. The socket-binding bootstrap
  *   responsibility (loading config, initializing the logger, binding the port,
  *   graceful shutdown) belongs to the root `server.js`. Exporting the app
- *   WITHOUT starting a listener is what makes the application independently
+ *   WITHOUT binding a network socket is what makes the application independently
  *   exercisable by automated tests, which drive it in-process via `supertest`
  *   without binding a real network socket.
  *
  * Consumer contract (MUST be honored):
  *   - server.js                 -> `const app = require('./src/app');`
- *                                  then `app.listen(config.PORT, config.HOST, ...)`
+ *                                  then binds it to config.PORT / config.HOST
  *   - tests/endpoints.test.js    -> `const app = require('../src/app');`
  *                                  then drives it with `supertest`
  *   Therefore the module's default export MUST be the bare Express `app` — a
- *   callable `(req, res)` request handler that also exposes `.listen()` /
- *   `.use()` — and `listen` MUST NOT be invoked anywhere in this file.
+ *   callable `(req, res)` request handler that also exposes network-bind /
+ *   `.use()` — and that network bind MUST NOT be invoked anywhere in this file.
  *
  * Middleware registration ORDER is functionally significant and fixed:
  *   1. express.json()  — parse JSON request bodies before any handler reads them
@@ -39,7 +39,7 @@
  *
  * Deliberate non-responsibilities (owned elsewhere — intentionally absent here
  * per AAP §0.3.1, §0.6.2):
- *   - No `app.listen(...)` / server bootstrap (owned by `server.js`).
+ *   - No network bind / server bootstrap (owned by `server.js`).
  *   - No inline route handlers (all routing lives under `src/routes/`).
  *   - No optional hardening middleware (helmet, compression, CORS) — explicitly
  *     out of scope.
@@ -69,8 +69,10 @@ const { notFound, errorHandler } = require('./middleware/errorHandler');
 const app = express();
 
 // 1. Body parsing — register first so downstream middleware and route handlers
-//    can rely on `req.body` being populated for JSON payloads.
-app.use(express.json());
+//    can rely on `req.body` being populated for JSON payloads. An explicit
+//    100kb body-size limit caps request-body memory use and reduces
+//    large-payload DoS exposure instead of relying on the framework default.
+app.use(express.json({ limit: '100kb' }));
 
 // 2. HTTP access logging (morgan -> winston) — register after body parsing and
 //    before the routers so every incoming request is logged once, up front.
@@ -92,6 +94,6 @@ app.use(notFound);
 //    async error is funneled, logged, and translated into an error response.
 app.use(errorHandler);
 
-// Export the configured application WITHOUT starting a listener. `server.js`
-// owns `app.listen(...)`; tests consume this `app` directly via `supertest`.
+// Export the configured application WITHOUT binding a network socket. `server.js`
+// owns the network bind; tests consume this `app` directly via `supertest`.
 module.exports = app;

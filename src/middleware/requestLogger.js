@@ -15,6 +15,14 @@
  * combined access log (remote address, user, timestamp, request line, status,
  * response size, referrer, and user-agent).
  *
+ * Security/privacy constraint: the `'combined'` format records the full request
+ * line, which includes the request path AND its query string. The service's
+ * endpoints accept no secret or sensitive inputs, and by convention secrets and
+ * other sensitive values MUST NOT be placed in URLs or query strings — such
+ * values belong in request bodies or headers, which this access log does not
+ * capture. Honoring this convention keeps the access log free of sensitive data
+ * without any per-request redaction.
+ *
  * Bridge detail: `morgan` appends a trailing newline (`\n`) to every line it
  * emits. The `winston` logger adds its own line break when it writes a record,
  * so the incoming message is `.trim()`-ed before being handed to

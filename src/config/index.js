@@ -7,10 +7,13 @@
  * `process.env` before any other module (logger, app factory, middleware)
  * reads them.
  *
- * `require('dotenv').config()` is intentionally invoked here, at module load
- * time, and MUST remain the very first executable statement in this file. This
- * single, process-wide call is the one intentional place where `.env` is
- * parsed, making those overrides available to every downstream consumer.
+ * `require('dotenv').config({ quiet: true })` is intentionally invoked here, at
+ * module load time, and MUST remain the very first executable statement in this
+ * file. This single, process-wide call is the one intentional place where `.env`
+ * is parsed, making those overrides available to every downstream consumer. The
+ * `quiet: true` option suppresses dotenv's own stdout startup banner so that ALL
+ * process output flows exclusively through the structured winston logging
+ * pipeline (FR-7) rather than emitting an unstructured line ahead of the JSON logs.
  *
  * The exported object exposes exactly four values, each sourced from
  * `process.env` with a safe default. The defaults preserve the original
@@ -28,7 +31,7 @@
  *
  * Conventions: CommonJS (require / module.exports), 2-space indentation.
  */
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 
 module.exports = {
   PORT: process.env.PORT || 3000,
