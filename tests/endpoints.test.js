@@ -36,11 +36,18 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const request = require('supertest');
+const express = require('express');
 
 // The Express `app` exported by the application factory. Imported with a bare
 // module specifier (no `.js` extension) per Node/CommonJS convention and passed
 // straight into supertest — never started with `app.listen`.
 const app = require('../src/app');
+
+// The centralized error handler, imported directly for the security regression
+// tests below. The production `app` deliberately has no error-producing route,
+// so those tests build throwaway in-process Express apps that wire `errorHandler`
+// exactly as `src/app.js` does (registered LAST) and drive them with supertest.
+const { errorHandler } = require('../src/middleware/errorHandler');
 
 // Test 1 — Backward-compatibility contract (FR-2). The original raw-`http`
 // handler [server.js:L6-L10] answered with `Hello, World!\n` (HTTP 200,
@@ -73,4 +80,50 @@ test('GET /does-not-exist returns HTTP 404 for an unknown route', async () => {
   const response = await request(app).get('/does-not-exist');
 
   assert.strictEqual(response.status, 404);
+});
+
+// Test 4 — SECURITY regression (information disclosure). When a route throws an
+// unexpected server-side error, the centralized `errorHandler` MUST respond 500
+// with a FIXED, generic body and MUST NOT echo the internal error message back
+// to the client (which could leak stack fragments, database/dependency errors,
+// file paths, or other operational data). The production `app` has no
+// error-producing route, so a throwaway Express app is built in-process and
+// wired exactly like `src/app.js` registers the real handler (mounted LAST),
+// then driven with supertest. This proves the 500 internals are not returned.
+test('errorHandler returns a generic 500 body and never leaks internal error details', async () => {
+  const sensitive = 'sensitive internal database failure on shard 7';
+  const failingApp = express();
+  failingApp.get('/boom', (req, res, next) => {
+    next(new Error(sensitive));
+  });
+  failingApp.use(errorHandler);
+
+  const response = await request(failingApp).get('/boom');
+
+  assert.strictEqual(response.status, 500);
+  assert.deepStrictEqual(response.body, { error: 'Internal Server Error' });
+  assert.ok(
+    !response.text.includes(sensitive),
+    'the internal error message must not appear anywhere in the 500 response body'
+  );
+});
+
+// Test 5 — Controlled client errors (4xx) still surface their intentional, safe
+// message, so legitimate API error feedback is preserved while only server-side
+// (5xx) internals are suppressed. This guards against the fix over-correcting
+// into a blanket message suppression.
+test('errorHandler passes through controlled 4xx client error messages', async () => {
+  const clientMessage = 'Invalid query parameter: id';
+  const clientErrApp = express();
+  clientErrApp.get('/bad-request', (req, res, next) => {
+    const err = new Error(clientMessage);
+    err.status = 400;
+    next(err);
+  });
+  clientErrApp.use(errorHandler);
+
+  const response = await request(clientErrApp).get('/bad-request');
+
+  assert.strictEqual(response.status, 400);
+  assert.strictEqual(response.body.error, clientMessage);
 });

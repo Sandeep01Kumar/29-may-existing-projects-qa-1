@@ -79,9 +79,13 @@ function notFound(req, res, next) {
  *      (`err.status` or `err.statusCode`, as set by libraries such as
  *      http-errors), defaulting to 500 for unclassified failures.
  *   3. Respond with that status and a consistent `{ error: <message> }` JSON
- *      body, mirroring the shape used by `notFound`. Only the message is
- *      exposed; internal details such as the stack are logged but never sent to
- *      the client.
+ *      body, mirroring the shape used by `notFound`. SECURITY (information
+ *      disclosure): for server-side (5xx) failures the body is a FIXED, generic
+ *      `Internal Server Error` so no internal detail — stack fragments,
+ *      database/dependency errors, file paths, or other operational data — ever
+ *      reaches the client; the full error is recorded in the server logs only.
+ *      Controlled client errors (4xx) carry an intentional, safe message and are
+ *      passed through unchanged, preserving useful API feedback.
  *
  * @param {*} err  The error forwarded by Express (Error, object, or string).
  * @param {import('express').Request}  req  Incoming Express request.
@@ -90,9 +94,25 @@ function notFound(req, res, next) {
  * @returns {void}
  */
 function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-vars
+  // Always log the FULL error server-side first (stack when available) so no
+  // diagnostic detail is ever lost, regardless of what is returned to the client.
   logger.error(err.stack || err.message || String(err));
+
+  // Derive the HTTP status from the error when it carries one (`err.status` or
+  // `err.statusCode`, as set by libraries such as http-errors), defaulting to
+  // 500 for unclassified failures.
   const status = err.status || err.statusCode || 500;
-  res.status(status).json({ error: err.message || 'Internal Server Error' });
+
+  // SECURITY (information disclosure): never expose internal details on
+  // server-side (5xx) failures. A 500's message can leak stack fragments,
+  // database/dependency errors, file paths, or other operational data, so every
+  // 5xx returns a FIXED, generic body. Controlled client errors (4xx) carry an
+  // intentional, safe message and are passed through, mirroring the
+  // `{ error: ... }` shape used by `notFound`. The full error is already logged
+  // above, so suppressing the client-facing message loses no diagnostic value.
+  const message = status >= 500 ? 'Internal Server Error' : (err.message || 'Error');
+
+  res.status(status).json({ error: message });
 }
 
 module.exports = { notFound, errorHandler };
