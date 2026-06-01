@@ -15,13 +15,17 @@
  * combined access log (remote address, user, timestamp, request line, status,
  * response size, referrer, and user-agent).
  *
- * Security/privacy constraint: the `'combined'` format records the full request
- * line, which includes the request path AND its query string. The service's
- * endpoints accept no secret or sensitive inputs, and by convention secrets and
- * other sensitive values MUST NOT be placed in URLs or query strings — such
- * values belong in request bodies or headers, which this access log does not
- * capture. Honoring this convention keeps the access log free of sensitive data
- * without any per-request redaction.
+ * Security/privacy — query-string redaction: the `'combined'` format records the
+ * full request line, which includes the request path AND its query string.
+ * Although sensitive values SHOULD never be placed in URLs, a client can still
+ * send them (e.g. `?token=...&password=...`), and logging those verbatim would
+ * leak secrets into the access log. To prevent this, the built-in morgan `:url`
+ * token is overridden below with a redacting variant: the request path is
+ * preserved unchanged, and the VALUE of any query parameter whose name matches a
+ * known sensitive key (token, password, secret, authorization, api_key, and
+ * common variants) is replaced with `[REDACTED]`. Non-sensitive parameters are
+ * still logged verbatim. The Authorization (and every other) request header is
+ * not part of the `'combined'` format, so headers are never logged either.
  *
  * Bridge detail: `morgan` appends a trailing newline (`\n`) to every line it
  * emits. The `winston` logger adds its own line break when it writes a record,
@@ -48,6 +52,70 @@ const logger = require('../utils/logger');
 const stream = {
   write: (message) => logger.info(message.trim())
 };
+
+// --- Sensitive query-parameter redaction -----------------------------------
+// Query-parameter names whose VALUES must never be written to the access log.
+// Matched case-insensitively, both as an exact name and (via the substring set
+// below) as a fragment, so variants such as `access_token`, `user_password`,
+// and `client_secret` are caught as well.
+const SENSITIVE_EXACT = new Set([
+  'token', 'password', 'passwd', 'pwd', 'secret', 'authorization', 'auth',
+  'api_key', 'apikey', 'access_token', 'refresh_token', 'session', 'sessionid',
+  'credential', 'credentials'
+]);
+const SENSITIVE_SUBSTRINGS = ['token', 'password', 'passwd', 'secret', 'apikey', 'api_key'];
+
+// Decide whether a query-parameter name is sensitive. The comparison is done on
+// the decoded, lowercased key so percent-encoded names are evaluated correctly.
+const isSensitiveKey = (key) => {
+  const normalized = key.toLowerCase();
+  if (SENSITIVE_EXACT.has(normalized)) {
+    return true;
+  }
+  return SENSITIVE_SUBSTRINGS.some((fragment) => normalized.includes(fragment));
+};
+
+// Return the request URL with the VALUES of any sensitive query parameters
+// replaced by `[REDACTED]`. The path, the original key text, and every
+// non-sensitive parameter are preserved verbatim so the access log stays
+// useful. A URL with no query string is returned unchanged.
+const redactUrl = (url) => {
+  const queryStart = url.indexOf('?');
+  if (queryStart === -1) {
+    return url;
+  }
+
+  const path = url.slice(0, queryStart);
+  const query = url.slice(queryStart + 1);
+
+  const redactedQuery = query
+    .split('&')
+    .map((pair) => {
+      const eq = pair.indexOf('=');
+      const rawKey = eq === -1 ? pair : pair.slice(0, eq);
+      let decodedKey;
+      try {
+        decodedKey = decodeURIComponent(rawKey);
+      } catch (err) {
+        // Malformed percent-encoding: fall back to the raw key for the check.
+        decodedKey = rawKey;
+      }
+      if (isSensitiveKey(decodedKey)) {
+        return `${rawKey}=[REDACTED]`;
+      }
+      return pair;
+    })
+    .join('&');
+
+  return `${path}?${redactedQuery}`;
+};
+
+// Override morgan's built-in `:url` token with the redacting variant. This keeps
+// the standard `'combined'` format string intact (the access-log layout is
+// unchanged) while guaranteeing no sensitive query value is ever emitted. The
+// default token returns `req.originalUrl || req.url`; this version mirrors that
+// and then redacts.
+morgan.token('url', (req) => redactUrl(req.originalUrl || req.url || ''));
 
 // Export the configured morgan middleware function directly so that app.js can
 // register it via `app.use(require('./middleware/requestLogger'))`.

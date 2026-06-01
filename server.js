@@ -65,29 +65,114 @@ const server = app.listen(config.PORT, config.HOST, () => {
 });
 
 /**
+ * Bounded grace period (in milliseconds) allowed for in-flight connections to
+ * drain during shutdown. If `server.close` has not completed within this window
+ * (for example because of a lingering keep-alive socket), the process force-
+ * exits so shutdown can never hang indefinitely. Kept as a named constant so the
+ * intent — and the value — are obvious at a glance.
+ */
+const SHUTDOWN_TIMEOUT_MS = 10000;
+
+/**
+ * Guards the shutdown sequence against re-entry. A process can receive more than
+ * one termination signal (for example SIGINT immediately followed by SIGTERM);
+ * without this flag `server.close` could be invoked more than once. Once shutdown
+ * has begun, any further signals are ignored.
+ * @type {boolean}
+ */
+let isShuttingDown = false;
+
+/**
+ * Flush the winston logger, then terminate the process with the given exit code.
+ *
+ * winston's logger is a writable stream: ending it emits a `'finish'` event once
+ * every buffered log record has been written. Exiting only after that event
+ * ensures the final shutdown log lines are not truncated by an immediate
+ * `process.exit()` — the gap that previously made shutdown logs appear to be
+ * missing. An unref'd safety timer guarantees the process still exits even if
+ * `'finish'` is never emitted, and the `exited` guard makes termination
+ * idempotent so it runs exactly once regardless of which path fires first.
+ *
+ * @param {number} code - The exit code to terminate with (0 = clean shutdown).
+ * @returns {void}
+ */
+const exitAfterFlush = (code) => {
+  let exited = false;
+  const done = () => {
+    if (exited) {
+      return;
+    }
+    exited = true;
+    process.exit(code);
+  };
+
+  logger.on('finish', done);
+  logger.end();
+  // Safety net: exit even if 'finish' never fires. unref() so this timer does
+  // not, by itself, keep the event loop (and the process) alive.
+  setTimeout(done, 250).unref();
+};
+
+/**
  * Gracefully shut the server down in response to a termination signal.
  *
  * Stops accepting new connections and waits for in-flight requests to drain
- * (`server.close`), then exits with code 0 to signal a clean shutdown. PM2 sends
- * SIGINT/SIGTERM on stop/reload/restart (and a terminal delivers SIGINT on
- * Ctrl+C), so honoring these signals lets the process manager cycle the app
- * without dropping in-flight work.
+ * (`server.close`), logs the lifecycle through winston, flushes the logger, and
+ * exits with code 0 to signal a clean shutdown. PM2 sends SIGINT/SIGTERM on
+ * stop/reload/restart (a terminal delivers SIGINT on Ctrl+C, and SIGBREAK on
+ * Ctrl+Break on Windows), so honoring these signals lets the process manager
+ * cycle the app without dropping in-flight work.
+ *
+ * Platform note: on Windows a signal delivered out-of-band by another process
+ * (e.g. `taskkill` / `process.kill`) force-terminates through `TerminateProcess`
+ * and cannot be intercepted by the runtime. These handlers fire for real console
+ * signals (Ctrl+C / Ctrl+Break) and for the signal events Node emits internally,
+ * which is the standard, portable graceful-shutdown contract.
  *
  * @param {string} signal - The received signal name (e.g. 'SIGTERM', 'SIGINT').
  * @returns {void}
  */
 const shutdown = (signal) => {
+  // Ignore repeated or additional signals once shutdown is already underway.
+  if (isShuttingDown) {
+    return;
+  }
+  isShuttingDown = true;
+
   logger.info(`${signal} received, shutting down gracefully`);
-  server.close(() => {
+
+  // Safety net: if `server.close` stalls, force the process to exit after a
+  // bounded grace period so shutdown can never hang. unref() keeps this timer
+  // from holding the event loop open on its own.
+  const forceExit = setTimeout(() => {
+    logger.error('Graceful shutdown timed out; forcing exit');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  forceExit.unref();
+
+  server.close((err) => {
+    clearTimeout(forceExit);
+    if (err) {
+      logger.error(`Error while closing server: ${err.message || err}`);
+      exitAfterFlush(1);
+      return;
+    }
     logger.info('Server closed');
-    process.exit(0);
+    exitAfterFlush(0);
   });
 };
 
-// Production process-lifecycle signals. PM2 (and Ctrl+C in a terminal) deliver
-// these; both route through the same graceful-shutdown path above.
+// Production process-lifecycle signals. PM2 (and a terminal's Ctrl+C) deliver
+// SIGTERM/SIGINT; both route through the same graceful-shutdown path above.
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Windows-only: Ctrl+Break is delivered as SIGBREAK. Registration is guarded by
+// the platform check because SIGBREAK is not a valid signal on POSIX systems,
+// where attaching a listener for it would throw.
+if (process.platform === 'win32') {
+  process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+}
 
 // Crash safety. Log the fatal condition through winston and exit non-zero so the
 // process manager (PM2) detects the failure and restarts a clean instance rather

@@ -31,9 +31,12 @@
  * Middleware registration ORDER is functionally significant and fixed:
  *   1. express.json()  — parse JSON request bodies before any handler reads them
  *   2. requestLogger   — morgan HTTP access logging streamed into winston
- *   3. routes ('/')    — the aggregated root router (GET /, GET /good-evening)
- *   4. notFound        — 404 for any path that matched no route (after routers)
- *   5. errorHandler    — centralized 4-arg error funnel, registered LAST so
+ *   3. method guard    — enforce the GET-only contract: HEAD and OPTIONS (which
+ *                        Express would otherwise auto-answer with 200) are
+ *                        funneled to notFound so every non-GET method returns 404
+ *   4. routes ('/')    — the aggregated root router (GET /, GET /good-evening)
+ *   5. notFound        — 404 for any path that matched no route (after routers)
+ *   6. errorHandler    — centralized 4-arg error funnel, registered LAST so
  *                        Express routes all errors to it (Express 5 also
  *                        auto-forwards rejected promises / async errors here)
  *
@@ -78,17 +81,36 @@ app.use(express.json({ limit: '100kb' }));
 //    before the routers so every incoming request is logged once, up front.
 app.use(requestLogger);
 
-// 3. Application routes — mount the aggregated root router at '/'. This exposes
+// 3. Method guard — enforce the application's GET-only contract. Every route in
+//    this service is GET-only (GET / and GET /good-evening), so any other HTTP
+//    method must be treated as unmatched and answered with 404. Express would
+//    otherwise auto-handle two of those methods: it answers HEAD by running the
+//    matching GET handler (200, no body) and answers OPTIONS with a 200 + `Allow`
+//    header. Intercepting HEAD and OPTIONS here — AFTER the access logger (so
+//    they are still logged) and BEFORE the routers (so the router's automatic
+//    handling never runs) — and forwarding them to the shared `notFound` handler
+//    makes them return a consistent 404, matching POST/PUT/PATCH/DELETE (which
+//    already fall through to notFound). ONLY HEAD and OPTIONS are intercepted;
+//    every other method proceeds unchanged, so the body parser registered above
+//    still governs POST payload handling (malformed-JSON 400, oversized 413).
+app.use((req, res, next) => {
+  if (req.method === 'HEAD' || req.method === 'OPTIONS') {
+    return notFound(req, res, next);
+  }
+  return next();
+});
+
+// 4. Application routes — mount the aggregated root router at '/'. This exposes
 //    the preserved `GET /` (-> `Hello, World!\n`) and the new
 //    `GET /good-evening` (-> `Good evening`), replacing the original single
 //    inline handler that answered all paths [server.js:L6-L10].
 app.use('/', routes);
 
-// 4. 404 handler — runs only when no route above matched the request, returning
+// 5. 404 handler — runs only when no route above matched the request, returning
 //    a consistent 404 response for unknown paths.
 app.use(notFound);
 
-// 5. Centralized error handler — MUST be registered LAST. Express recognizes
+// 6. Centralized error handler — MUST be registered LAST. Express recognizes
 //    error-handling middleware exclusively by its 4-argument arity, so this is
 //    where every `next(err)` and (in Express 5) every rejected promise / thrown
 //    async error is funneled, logged, and translated into an error response.
